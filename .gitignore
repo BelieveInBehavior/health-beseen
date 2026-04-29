@@ -1,0 +1,7 @@
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+client/dist/
+server/memory/store/*.json
+.env.local
