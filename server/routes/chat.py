@@ -22,7 +22,18 @@ from server.cache import get_assessment_cache, set_assessment_cache
 from server.db import get_db
 from server.engine.agent import run_assessment
 from server.engine.executor import stream_result
+from server.engine.agent_loop import run_agent_loop
 from server.engine.router import route
+from server.engine.workspace_tools import (
+    bash_tool,
+    delete_file_tool,
+    glob_files_tool,
+    grep_tool,
+    list_files_tool,
+    read_document_tool,
+    read_file_tool,
+    write_file_tool,
+)
 from server.memory.manager import save_assessment
 from server.models import ChatRequest, HistoryItem, HistoryResponse
 
@@ -142,8 +153,131 @@ async def _handle_text(text: str) -> AsyncGenerator[dict, None]:
     yield _sse("complete", {"status": "done"})
 
 
-async def chat_stream(req: ChatRequest) -> AsyncGenerator[dict, None]:
-    """根据路由决策生成 SSE 事件流。"""
+def _format_read_file(r: dict) -> str:
+    if not r.get("ok"):
+        return f"读取文件失败：{r.get('error', 'unknown')}"
+    path = r.get("path", "")
+    start = int(r.get("offset", 0)) + 1
+    end = start + int(r.get("lines", 0)) - 1
+    nlines = r.get("total_lines", 0)
+    head = f"**{path}** 第 {start}–{end} 行（共 {nlines} 行）"
+    if r.get("truncated_bytes"):
+        head += "；文件过大已按字节截断"
+    return f"{head}\n\n```\n{r.get('content', '')}\n```"
+
+
+def _format_bash(r: dict) -> str:
+    if r.get("error"):
+        return f"命令执行失败：{r.get('error')}"
+    status = "成功" if r.get("ok") else f"退出码 {r.get('exit_code')}"
+    cwd = r.get("cwd", ".")
+    out = r.get("output", "")
+    return f"**bash**（cwd: `{cwd}`）{status}\n\n```\n{out}\n```"
+
+
+def _format_list_files(r: dict) -> str:
+    if not r.get("ok"):
+        return f"列出目录失败：{r.get('error', 'unknown')}"
+    return f"**{r.get('path', '.')}**\n\n```\n{r.get('listing', '')}\n```"
+
+
+def _format_read_document(r: dict) -> str:
+    if not r.get("ok"):
+        return f"读取文档失败：{r.get('error', 'unknown')}"
+    body = r.get("content", "")
+    if r.get("truncated"):
+        body += "\n\n（输出已截断）"
+    return f"**{r.get('path', '')}**\n\n```\n{body}\n```"
+
+
+def _format_write_file(r: dict) -> str:
+    if not r.get("ok"):
+        return f"写入失败：{r.get('error', 'unknown')}"
+    return f"已写入 `{r.get('path', '')}`（{r.get('bytes_written', 0)} 字节）"
+
+
+def _format_delete_file(r: dict) -> str:
+    if not r.get("ok"):
+        return f"删除失败：{r.get('error', 'unknown')}"
+    return f"已删除 `{r.get('path', '')}`"
+
+
+def _format_grep(r: dict) -> str:
+    if not r.get("ok"):
+        return f"grep 失败：{r.get('error', 'unknown')}"
+    lines = [f"模式 `{r.get('pattern')}` 在 `{r.get('path')}` 下共 {r.get('match_count', 0)} 处匹配："]
+    for m in r.get("matches") or []:
+        lines.append(f"- `{m.get('path')}`:{m.get('line')}  {m.get('text', '')}")
+    if r.get("truncated"):
+        lines.append("\n（结果已截断，请缩小 path 或收紧 pattern）")
+    return "\n".join(lines)
+
+
+def _format_glob_files(r: dict) -> str:
+    if not r.get("ok"):
+        return f"glob 失败：{r.get('error', 'unknown')}"
+    paths = r.get("paths") or []
+    body = "\n".join(f"- `{p}`" for p in paths[:200])
+    if len(paths) > 200:
+        body += f"\n… 共 {len(paths)} 条（仅展示前 200）"
+    if r.get("truncated"):
+        body += "\n（已截断，请细化 glob）"
+    return f"**{r.get('root', '.')}` / `{r.get('pattern')}`**\n\n{body or '（无匹配）'}"
+
+
+async def _handle_workspace_tool(tool: str, args: dict) -> AsyncGenerator[dict, None]:
+    """actone 风格工作区工具 → SSE message + tool_result。"""
+    yield _sse("intent", {"type": "workspace", "tool": tool})
+
+    if tool == "list_files":
+        r = list_files_tool(str(args.get("path", "") or ""))
+        text = _format_list_files(r)
+    elif tool == "read_file":
+        offset = args.get("offset", 0)
+        limit = args.get("limit")
+        r = read_file_tool(
+            str(args.get("path", "")),
+            offset=int(offset) if offset is not None else 0,
+            limit=int(limit) if limit is not None else None,
+        )
+        text = _format_read_file(r)
+    elif tool == "read_document":
+        r = read_document_tool(str(args.get("path", "")))
+        text = _format_read_document(r)
+    elif tool == "write_file":
+        r = write_file_tool(str(args.get("path", "")), str(args.get("content", "")))
+        text = _format_write_file(r)
+    elif tool == "delete_file":
+        r = delete_file_tool(str(args.get("path", "")))
+        text = _format_delete_file(r)
+    elif tool == "grep":
+        r = grep_tool(
+            str(args.get("pattern", "")),
+            str(args.get("path", "") or ""),
+            file_glob=str(args.get("file_glob", "*")),
+            case_insensitive=bool(args.get("case_insensitive", True)),
+        )
+        text = _format_grep(r)
+    elif tool == "glob_files":
+        r = glob_files_tool(
+            str(args.get("pattern", "")),
+            str(args.get("root", "") or ""),
+        )
+        text = _format_glob_files(r)
+    elif tool == "bash":
+        r = bash_tool(str(args.get("command", "")), args.get("cwd"))
+        text = _format_bash(r)
+    else:
+        r = {"ok": False, "error": "unknown tool"}
+        text = "未知工作区工具"
+
+    yield _sse("message", {"content": text})
+    yield _sse("tool_result", {"tool": tool, "result": r})
+    yield _sse("complete", {"status": "done"})
+
+
+async def _chat_stream_single_shot(req: ChatRequest) -> AsyncGenerator[dict, None]:
+    """单跳 route：一次模型调用 → 至多执行一个工具。"""
     decision = await route(req.message, req.history, req.session_id)
     logger.info(
         "Router decision: type=%s tool=%s",
@@ -159,7 +293,8 @@ async def chat_stream(req: ChatRequest) -> AsyncGenerator[dict, None]:
     tool = decision.tool_name
     args = decision.tool_args
 
-    if tool == "submit_assessment":
+    if tool == "assess_symptoms":
+        # Skill: 完整评估流程（submit_assessment → 持久化 → 取结果 → 流式展示）
         symptoms_text = args.get("symptoms_text", req.message)
         async for event in _handle_assessment(req.session_id, symptoms_text):
             yield event
@@ -178,10 +313,38 @@ async def chat_stream(req: ChatRequest) -> AsyncGenerator[dict, None]:
         async for event in _handle_contact(req.session_id, reason):
             yield event
 
+    elif tool in (
+        "list_files",
+        "read_file",
+        "read_document",
+        "write_file",
+        "delete_file",
+        "grep",
+        "glob_files",
+        "bash",
+    ):
+        async for event in _handle_workspace_tool(tool, args):
+            yield event
+
     else:
         # 未知 tool → 降级为文本
         async for event in _handle_text(decision.text or "抱歉，我没有理解您的意思。"):
             yield event
+
+
+async def chat_stream(req: ChatRequest) -> AsyncGenerator[dict, None]:
+    """根据 use_agent_loop：多轮 agent loop 或单跳 legacy。"""
+    if req.use_agent_loop:
+        try:
+            async for event in run_agent_loop(req.session_id, req.message, req.history):
+                yield event
+        except Exception as e:
+            logger.exception("agent_loop failed, falling back to single-shot: %s", e)
+            async for event in _chat_stream_single_shot(req):
+                yield event
+        return
+    async for event in _chat_stream_single_shot(req):
+        yield event
 
 
 @router.post("/chat")

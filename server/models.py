@@ -78,6 +78,8 @@ class ChatRequest(BaseModel):
     session_id: str
     message: str
     history: list[dict[str, str]] = Field(default_factory=list)
+    # True：多轮 agent loop（read_file / bash / grep 等可连续调用）；False：单跳 route（兼容旧行为）
+    use_agent_loop: bool = Field(default=True, description="是否使用多轮 Agent Loop")
 
 
 class RouterDecision(BaseModel):

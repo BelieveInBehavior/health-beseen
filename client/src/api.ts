@@ -19,8 +19,39 @@ export interface ChatCallbacks {
   onHistory?: (data: HistoryResponse) => void;
   onResult?: (data: AssessmentResult) => void;
   onContact?: (data: { id: string; status: string; message: string }) => void;
+  /** 工作区工具（list_files / read_file / read_document / write_file / delete_file / bash）原始结果 */
+  onToolResult?: (data: { tool: string; result: Record<string, unknown> }) => void;
   onComplete?: (data: { status: string; assessment_id?: string }) => void;
   onError?: (err: unknown) => void;
+}
+
+interface ParsedSSEEvent {
+  eventName: string;
+  data: unknown;
+}
+
+function parseSSEChunk(part: string): ParsedSSEEvent | null {
+  const lines = part.trim().split(/\r?\n/);
+  let eventName = "";
+  let dataStr = "";
+
+  for (const rawLine of lines) {
+    const line = rawLine.trim();
+    if (line.startsWith("event:")) {
+      eventName = line.slice("event:".length).trim();
+    } else if (line.startsWith("data:")) {
+      // Support both `data:xxx` and `data: xxx`
+      dataStr += line.slice("data:".length).trim();
+    }
+  }
+
+  if (!eventName || !dataStr) return null;
+
+  try {
+    return { eventName, data: JSON.parse(dataStr) };
+  } catch {
+    return null;
+  }
 }
 
 /** 统一对话入口 — SSE 流式接收 */
@@ -58,20 +89,13 @@ export function sendChat(
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        const parts = buffer.split("\n\n");
+        const parts = buffer.split(/\r?\n\r?\n/);
         buffer = parts.pop() ?? "";
 
         for (const part of parts) {
-          const lines = part.trim().split("\n");
-          let eventName = "";
-          let data = "";
-          for (const line of lines) {
-            if (line.startsWith("event: ")) eventName = line.slice(7);
-            else if (line.startsWith("data: ")) data = line.slice(6);
-          }
-          if (!eventName || !data) continue;
-
-          const parsed = JSON.parse(data);
+          const parsedEvent = parseSSEChunk(part);
+          if (!parsedEvent) continue;
+          const { eventName, data: parsed } = parsedEvent;
           switch (eventName) {
             case "intent": callbacks.onIntent?.(parsed); break;
             case "message": callbacks.onMessage?.(parsed); break;
@@ -83,6 +107,7 @@ export function sendChat(
             case "history": callbacks.onHistory?.(parsed); break;
             case "result": callbacks.onResult?.(parsed); break;
             case "contact": callbacks.onContact?.(parsed); break;
+            case "tool_result": callbacks.onToolResult?.(parsed as { tool: string; result: Record<string, unknown> }); break;
             case "complete": callbacks.onComplete?.(parsed); break;
           }
         }
@@ -97,7 +122,7 @@ export function sendChat(
   return controller;
 }
 
-const API_BASE = "/api";
+const API_BASE = "http://localhost:8000/api";
 
 /** 提交评估 — 通过 SSE 流式接收结果 */
 export function submitAssessment(
@@ -144,20 +169,13 @@ export function submitAssessment(
         if (done) break;
         buffer += decoder.decode(value, { stream: true });
 
-        const parts = buffer.split("\n\n");
+        const parts = buffer.split(/\r?\n\r?\n/);
         buffer = parts.pop() ?? "";
 
         for (const part of parts) {
-          const lines = part.trim().split("\n");
-          let eventName = "";
-          let data = "";
-          for (const line of lines) {
-            if (line.startsWith("event: ")) eventName = line.slice(7);
-            else if (line.startsWith("data: ")) data = line.slice(6);
-          }
-          if (!eventName || !data) continue;
-
-          const parsed = JSON.parse(data);
+          const parsedEvent = parseSSEChunk(part);
+          if (!parsedEvent) continue;
+          const { eventName, data: parsed } = parsedEvent;
           switch (eventName) {
             case "risk": onRisk(parsed); break;
             case "advice": onAdvice(parsed); break;

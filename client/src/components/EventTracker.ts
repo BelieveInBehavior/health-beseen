@@ -8,7 +8,7 @@
  * 5. assessment_closed     — 离开结果页 / 开始新评估
  */
 
-const API_BASE = "/api";
+const API_BASE = "http://localhost:8000/api";
 
 export type EventName =
   | "assessment_started"

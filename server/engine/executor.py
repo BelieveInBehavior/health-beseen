@@ -11,8 +11,13 @@ from collections.abc import AsyncGenerator
 from server.models import AssessmentResult
 
 
-async def stream_result(result: AssessmentResult) -> AsyncGenerator[dict, None]:
-    """生成 SSE 事件流。每个事件为 dict(event=..., data=...)，由 sse-starlette 格式化。"""
+async def stream_result(
+    result: AssessmentResult,
+    *,
+    emit_complete: bool = True,
+) -> AsyncGenerator[dict, None]:
+    """生成 SSE 事件流。每个事件为 dict(event=..., data=...)，由 sse-starlette 格式化。
+    emit_complete=False 用于嵌入 agent loop（最终 complete 由外层统一发送）。"""
 
     # 1. risk
     yield _sse("risk", {
@@ -45,11 +50,12 @@ async def stream_result(result: AssessmentResult) -> AsyncGenerator[dict, None]:
         "assessment_id": result.assessment_id,
     })
 
-    # 6. complete
-    yield _sse("complete", {
-        "assessment_id": result.assessment_id,
-        "status": "done",
-    })
+    # 6. complete（可选：agent loop 内嵌调用时不发送，避免前端提前结束）
+    if emit_complete:
+        yield _sse("complete", {
+            "assessment_id": result.assessment_id,
+            "status": "done",
+        })
 
 
 def _sse(event: str, data: dict) -> dict:

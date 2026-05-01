@@ -31,18 +31,25 @@ health-beseen/
 │   ├── models.py
 │   ├── routes/
 │   │   ├── assessment.py
+│   │   ├── chat.py        ← POST /api/chat（SSE，含工作区工具）
 │   │   └── collaboration.py
 │   ├── engine/
 │   │   ├── agent.py
 │   │   ├── perception.py
 │   │   ├── rules.py
 │   │   ├── planner.py
+│   │   ├── router.py      ← LLM tool-use 路由（SKILL 经 read_file + skills_prompt 注入）
+│   │   ├── skills_prompt.py
+│   │   ├── skills_index.py   ← actone 式 load skills index（一层目录 + 平铺 .md）
+│   │   ├── workspace_tools.py
 │   │   └── executor.py
 │   ├── memory/
 │   │   ├── manager.py
 │   │   └── store/
 │   └── events/
 │       └── tracker.py
+├── skills/                ← Agent SKILL.md（注入 `<available_skills>`，经 read_file 读取）
+│   └── breastcare_assistant/SKILL.md
 └── .gitignore
 ```
 
@@ -50,13 +57,35 @@ health-beseen/
 
 ```bash
 cd server
-python -m venv .venv
+# 建议使用 Python 3.12 或 3.13（3.14 上 pydantic-core 可能无法预编译安装）
+python3.12 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python main.py
 ```
 
 默认地址：`http://localhost:8000`
+
+### VSCode Debug 后端
+
+已提供可直接使用的 VSCode 配置：
+
+- `.vscode/launch.json`：`Backend: Uvicorn (Debug)`
+- `.vscode/tasks.json`：启动前自动执行 `docker compose stop server`，避免本地 Debug 与容器端口冲突
+
+调试步骤：
+
+1. 先确保基础依赖在运行（建议至少启动 MongoDB / Redis）：
+   ```bash
+   docker compose up -d mongodb redis
+   ```
+2. 确认 `server/.venv` 已安装依赖：
+   ```bash
+   cd server
+   source .venv/bin/activate
+   pip install -r requirements.txt
+   ```
+3. 在 VSCode Run and Debug 里选择 `Backend: Uvicorn (Debug)`，按 `F5` 启动。
 
 ### LLM Provider 配置（OpenAI / Azure / OpenRouter）
 
@@ -82,6 +111,48 @@ LLM_MODEL=openai/gpt-4o-mini
 LLM_API_KEY=sk-or-xxx
 LLM_BASE_URL=https://openrouter.ai/api/v1
 ```
+
+### 工作区工具（actone-ai `backend` 对齐）与 Skill 索引
+
+参考 `/Users/wangxinyu/Desktop/actone-ai/backend` 的 `agent_tools` / `agent_context`：
+
+- **Skill 索引**：`server/engine/skills_index.py` 的 `load_skills_index_markdown()` 对应 actone `_load_skills_index`——在 `skills/` 下**只扫一层**（目录内 `SKILL.md` 或平铺 `*.md`），在 system 里生成 **Markdown 表格**（Skill / Description / File）+ 使用规则；完整内容用 **`read_file`** 读「File」列路径。`skills_prompt.py` 同时附带 `<available_skills>` XML。
+- **不把「读 skill」做成单独 LLM 工具**，与 OpenClaw / actone 一致。
+
+| 工具 | 作用 |
+|------|------|
+| `list_files` | 列出工作区内目录内容（path 相对根，空为根目录） |
+| `glob_files` | 按 glob 枚举路径（如 `**/*.py`），不经过 shell |
+| `grep` | 在工作区内用 **Python 正则**搜文件内容（非 shell，防注入）；可配 `GREP_MAX_*` |
+| `read_file` | 读文本文件（含 SKILL.md；可选 offset/limit 按行） |
+| `read_document` | 从 PDF / DOCX / XLSX 抽文本（依赖 pdfplumber、python-docx、openpyxl） |
+| `write_file` | 写入/覆盖文本文件（`WORKSPACE_WRITE_ENABLED`） |
+| `delete_file` | 删除单文件（`WORKSPACE_DELETE_PROTECTED` 保护部分路径） |
+| `bash` | 在受控目录执行 `bash -lc`（可关）；搜代码优先 `grep`/`glob_files` |
+
+环境变量示例：
+
+```bash
+# 可选：工作区根路径（默认项目根）
+HEALTH_BESEEN_WORKSPACE=/path/to/health-beseen
+# 相对工作区的 skill 目录，多个用 : 分隔（默认 skills）
+SKILLS_DIR=skills
+# 关闭 shell 工具（生产建议按需关闭）
+ENABLE_BASH_TOOL=0
+WORKSPACE_WRITE_ENABLED=0
+WORKSPACE_DELETE_PROTECTED=.env,server/.env
+WORKSPACE_BASH_TIMEOUT_SEC=60
+WORKSPACE_BASH_MAX_OUTPUT_CHARS=80000
+READ_FILE_MAX_BYTES=262144
+READ_DOCUMENT_MAX_CHARS=24000
+# grep / glob（Agent Loop 内与 bash 并列，不启 shell）
+GREP_MAX_FILES=400
+GREP_MAX_MATCHES=200
+GLOB_MAX_RESULTS=500
+# WORKSPACE_GREP_SKIP_DIRS=node_modules,.git,venv,.venv
+```
+
+自定义 Skill：在 `skills/<名称>/SKILL.md` 编写说明文档；启动对话时会被扫描进 `<available_skills>`，模型用 **`read_file`** 打开对应 path 即可（与 OpenClaw 用读文件工具打开 SKILL.md 的方式一致）。`SKILL.md` 不是单独的 `.yaml` 文件；若使用元数据，可在正文前用 `---` … `---` 包住 **YAML frontmatter**（与 OpenClaw `parseFrontmatterBlock` 语义一致），依赖 **PyYAML** 解析；若仅做服务端扩展解析可用 `server/engine/skill_snap.py`。
 
 Azure OpenAI 示例：
 
@@ -112,6 +183,11 @@ npm run dev
 
 默认地址：`http://localhost:5173`
 
+前端接口调用方式（当前默认）：
+- 直接请求后端：`http://localhost:8000/api`
+- 不依赖 Vite `/api` 代理
+- SSE 事件解析兼容 `event:xxx` / `event: xxx` 与 `data:xxx` / `data: xxx` 两种写法，并支持 `\n` 与 `\r\n` 换行分隔
+
 ## API 概览
 
 - `POST /api/assess` 提交副作用评估
@@ -119,6 +195,7 @@ npm run dev
 - `GET /api/history?session_id=...` 获取历史记录
 - `POST /api/contact-team` 创建协同请求
 - `POST /api/events` 上报事件
+- `POST /api/chat` 默认 **`use_agent_loop: true`**：多轮 Agent Loop，可连续调用 `read_file`、`bash`、`grep`、`glob_files` 等直至模型产出最终回复；设为 `false` 则退回单跳路由（每次最多一次工具调用）。
 
 ## Agent Tool-Use 设计
 
@@ -135,7 +212,9 @@ npm run dev
 
 ### Tool 定义
 
-以下 4 个 Tool 供 LLM function calling 选择：
+实现见 `server/engine/router.py`：**业务侧**以 `assess_symptoms`（主路径）、`get_result`、`get_history`、`contact_team` 为主；**仓库侧**为 `read_file` 与 `bash`。与 OpenClaw 一致，**不把读取 SKILL.md 做成单独工具**——可用 skill 的路径写在每条请求的 system 片段 `<available_skills>` 中，模型用 **`read_file`** 打开对应 path 即可。
+
+下文仍以文档化的 schema 形式列出主要能力（名称与实现中 `function.name` 可能用 `assess_symptoms` 等统一命名）：
 
 #### 1. `submit_assessment` — 提交症状评估
 
