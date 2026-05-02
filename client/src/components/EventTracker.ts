@@ -8,6 +8,7 @@
  * 5. assessment_closed     — 离开结果页 / 开始新评估
  */
 
+import { getUserToken, getParentSessionId } from "../userToken";
 const API_BASE = "http://localhost:8000/api";
 
 export type EventName =
@@ -15,7 +16,8 @@ export type EventName =
   | "assessment_submitted"
   | "result_viewed"
   | "contact_team_clicked"
-  | "assessment_closed";
+  | "assessment_closed"
+  | "feedback_submitted";
 
 export async function trackEvent(
   eventName: EventName,
@@ -24,12 +26,16 @@ export async function trackEvent(
   payload?: Record<string, unknown>
 ): Promise<void> {
   try {
+    const userToken = getUserToken();
+    const parentSessionId = getParentSessionId();
     await fetch(`${API_BASE}/events`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         event_name: eventName,
         session_id: sessionId,
+        user_token: userToken,
+        parent_session_id: parentSessionId,
         assessment_id: assessmentId ?? null,
         payload: payload ?? {},
       }),

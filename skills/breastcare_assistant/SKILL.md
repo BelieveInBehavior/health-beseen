@@ -1,11 +1,11 @@
 ---
 name: breastcare_assistant
-description: 乳腺癌治疗副作用评估对话与路由（Health-BeSeen）
+description: 肿瘤治疗相关症状与副作用评估对话与路由（Health-BeSeen；具体病种由部署环境 ASSISTANT_SYSTEM_ROLE 配置）
 ---
 
-# Breastcare Assistant Skill
+# Symptom Assessment Skill
 
-当用户描述身体不适或化疗/靶向治疗相关症状时，优先走 **assess_symptoms** 完整评估流程。
+当用户描述身体不适或治疗相关症状（含化疗/放疗/靶向/免疫等）时，优先走 **assess_symptoms** 完整评估流程。
 
 ## 何时使用
 

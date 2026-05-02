@@ -8,7 +8,8 @@ Rule Engine — 高/中/低三层规则树, Priority 顺序匹配, 命中即停�
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
+import numpy as np
 from server.config import settings
 
 RULE_VERSION = settings.RULE_VERSION
@@ -22,6 +23,7 @@ class Rule:
     keywords: list[str]
     advice: str
     evidence: str
+    matched_by: str = "keyword"
 
 
 # ───────────────────── HIGH ─────────────────────
@@ -188,3 +190,138 @@ def evaluate(text: str) -> tuple[list[Rule], list[str], float]:
     confidence = min(hit_kws / max(total_kws_in_matched, 1), 1.0)
 
     return matched, all_ids, confidence
+
+
+async def evaluate_hybrid(
+    text: str,
+    rule_embeddings: list[dict],
+) -> tuple[list[Rule], list[str], float]:
+    """
+    混合检索：关键词二值得分 + 余弦相似度，加权合并后按 level-stop 策略返回。
+
+    hybrid_score = kw_weight × kw_score + (1 - kw_weight) × sem_score
+      kw_score  = 1.0 若任一关键词命中，否则 0.0（二值，保留原有"任一命中"语义）
+      sem_score = 余弦相似度（0-1）
+
+    graceful degradation：rule_embeddings 为空或 embedding API 失败时自动回退到 evaluate()。
+    """
+    from server.engine.rule_embedder import get_embedding
+
+    all_ids = [r.id for r in ALL_RULES]
+
+    if not rule_embeddings:
+        return evaluate(text)
+
+    query_emb = await get_embedding(text)
+    if not query_emb:
+        return evaluate(text)
+
+    sem_by_id: dict[str, float] = {
+        row["rule_id"]: _cosine_similarity(query_emb, row.get("embedding") or [])
+        for row in rule_embeddings
+        if row.get("rule_id")
+    }
+
+    kw_weight = settings.HYBRID_KEYWORD_WEIGHT
+    sem_weight = 1.0 - kw_weight
+
+    candidates: list[tuple[Rule, float]] = []
+    for rule in ALL_RULES:
+        kw_hit = any(kw in text for kw in rule.keywords)
+        kw_score = 1.0 if kw_hit else 0.0
+        sem_score = sem_by_id.get(rule.id, 0.0)
+        hybrid_score = kw_weight * kw_score + sem_weight * sem_score
+
+        if hybrid_score < settings.HYBRID_THRESHOLD:
+            continue
+
+        if kw_hit and sem_score > 0.0:
+            mb = "hybrid"
+        elif kw_hit:
+            mb = "keyword"
+        else:
+            mb = "semantic"
+
+        candidates.append((
+            Rule(
+                id=rule.id,
+                level=rule.level,
+                priority=rule.priority,
+                keywords=rule.keywords,
+                advice=rule.advice,
+                evidence=rule.evidence,
+                matched_by=mb,
+            ),
+            hybrid_score,
+        ))
+
+    if not candidates:
+        return [], all_ids, 0.0
+
+    candidates.sort(key=lambda x: (x[0].priority, x[1]), reverse=True)
+    top_level = candidates[0][0].level
+    matched = [r for r, _ in candidates if r.level == top_level]
+    confidence = max(s for r, s in candidates if r.level == top_level)
+    return matched, all_ids, float(confidence)
+
+
+def _cosine_similarity(vec_a: list[float], vec_b: list[float]) -> float:
+    if not vec_a or not vec_b:
+        return 0.0
+    a = np.array(vec_a, dtype=np.float32)
+    b = np.array(vec_b, dtype=np.float32)
+    denom = float(np.linalg.norm(a) * np.linalg.norm(b))
+    if denom <= 0:
+        return 0.0
+    return float(np.dot(a, b) / denom)
+
+
+async def evaluate_semantic(
+    text: str,
+    rule_embeddings: list[dict],
+) -> tuple[list[Rule], list[str], float]:
+    """
+    语义规则检索：输入文本 embedding 与规则 embedding 做 cosine 相似度。
+    返回值与 evaluate() 对齐。
+    """
+    from server.engine.rule_embedder import get_embedding
+
+    all_ids = [r.id for r in ALL_RULES]
+    if not settings.SEMANTIC_RETRIEVAL_ENABLED or not rule_embeddings:
+        return [], all_ids, 0.0
+
+    query_emb = await get_embedding(text)
+    if not query_emb:
+        return [], all_ids, 0.0
+
+    by_id = {r.id: r for r in ALL_RULES}
+    candidates: list[tuple[Rule, float]] = []
+    for row in rule_embeddings:
+        rule_id = row.get("rule_id")
+        emb = row.get("embedding") or []
+        if rule_id not in by_id:
+            continue
+        score = _cosine_similarity(query_emb, emb)
+        if score >= settings.SEMANTIC_THRESHOLD:
+            src = by_id[rule_id]
+            candidates.append((
+                Rule(
+                    id=src.id,
+                    level=src.level,
+                    priority=src.priority,
+                    keywords=src.keywords,
+                    advice=src.advice,
+                    evidence=src.evidence,
+                    matched_by="semantic",
+                ),
+                score,
+            ))
+
+    if not candidates:
+        return [], all_ids, 0.0
+
+    candidates.sort(key=lambda x: (x[0].priority, x[1]), reverse=True)
+    top_level = candidates[0][0].level
+    matched = [rule for rule, _ in candidates if rule.level == top_level]
+    confidence = max(score for rule, score in candidates if rule.level == top_level)
+    return matched, all_ids, float(confidence)

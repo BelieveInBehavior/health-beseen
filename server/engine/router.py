@@ -27,8 +27,8 @@ logger = logging.getLogger(__name__)
 
 # ──────────────────── System Prompt ────────────────────
 
-ROUTER_SYSTEM_BASE = """\
-你是乳腺癌治疗副作用评估助手。你有以下能力可以使用：
+ROUTER_SYSTEM_BASE = f"""\
+你是{settings.ASSISTANT_SYSTEM_ROLE}。你有以下能力可以使用：
 
 【Skill】assess_symptoms — 完整的症状评估流程（主路径）
   当用户明确描述了身体不适或副作用症状时调用。内部会自动完成评估、取结果、展示全流程。

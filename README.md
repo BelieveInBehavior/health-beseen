@@ -1,10 +1,12 @@
 # Health-BeSeen MVP
 
-基于 FastAPI + React 的乳腺癌副作用评估原型，包含：
+基于 FastAPI + React 的**可配置临床域**症状评估原型（助手身份由环境变量统一注入），包含：
 - 感知-决策-执行-学习闭环（规则优先，未命中时走规划器）
 - MongoDB 持久化（assessments / event_logs / collaboration_requests）
 - 文件系统 Memory（单次记录 + 聚合统计）
 - 前端输入、结果、历史页面与事件上报
+
+**临床域**：路由（`router.py`）、Agent Loop（`agent_loop.py`）、规划器（`planner.py`）共用 `ASSISTANT_SYSTEM_ROLE`（默认「肿瘤治疗副作用评估助手」）。切换病种（如宫颈癌 / HPV / 宫颈病变）时设环境变量即可；**症状匹配逻辑**仍在 `server/engine/rules.py`，建议同步维护关键词与 `RULE_VERSION`，必要时重建规则嵌入缓存。
 
 ## 项目结构
 
@@ -19,6 +21,7 @@ health-beseen/
 │       ├── main.tsx
 │       ├── App.tsx
 │       ├── api.ts
+│       ├── userToken.ts
 │       ├── components/
 │       │   ├── RiskBadge.tsx
 │       │   └── EventTracker.ts
@@ -38,6 +41,10 @@ health-beseen/
 │   │   ├── perception.py
 │   │   ├── rules.py
 │   │   ├── planner.py
+│   │   ├── rule_embedder.py
+│   │   ├── user_memory.py
+│   │   ├── rag_store.py
+│   │   ├── summarizer.py
 │   │   ├── router.py      ← LLM tool-use 路由（SKILL 经 read_file + skills_prompt 注入）
 │   │   ├── skills_prompt.py
 │   │   ├── skills_index.py   ← actone 式 load skills index（一层目录 + 平铺 .md）
@@ -101,6 +108,9 @@ LLM_TEMPERATURE=0.2
 LLM_TOP_P=1.0
 # 可选，默认 https://api.openai.com/v1
 LLM_BASE_URL=https://api.openai.com/v1
+
+# 可选：助手对外身份（路由 / Agent / Planner 共用）
+# ASSISTANT_SYSTEM_ROLE=宫颈癌及HPV相关随诊与症状评估助手
 ```
 
 OpenRouter 示例：
@@ -195,7 +205,11 @@ npm run dev
 - `GET /api/history?session_id=...` 获取历史记录
 - `POST /api/contact-team` 创建协同请求
 - `POST /api/events` 上报事件
+- `POST /api/feedback` 上报用户反馈
+- `POST /api/session/summarize` 触发会话摘要沉淀
 - `POST /api/chat` 默认 **`use_agent_loop: true`**：多轮 Agent Loop，可连续调用 `read_file`、`bash`、`grep`、`glob_files` 等直至模型产出最终回复；设为 `false` 则退回单跳路由（每次最多一次工具调用）。
+
+说明：`/api/assess` 与 `/api/chat` 请求需携带 `user_token`（前端通过 `localStorage` 持久化），用于跨 session 用户记忆与语义检索数据沉淀。
 
 ## Agent Tool-Use 设计
 

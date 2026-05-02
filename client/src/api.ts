@@ -1,4 +1,5 @@
 import type { AssessmentResult, HistoryResponse, RuleHit } from "./types";
+import { getUserToken, getParentSessionId } from "./userToken";
 
 // ──────────────── Chat API (Agent 模式) ────────────────
 
@@ -65,11 +66,15 @@ export function sendChat(
 
   (async () => {
     try {
+      const userToken = getUserToken();
+      const parentSessionId = getParentSessionId();
       const resp = await fetch(`${API_BASE}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           session_id: sessionId,
+          user_token: userToken,
+          parent_session_id: parentSessionId,
           message,
           history,
         }),
@@ -97,18 +102,24 @@ export function sendChat(
           if (!parsedEvent) continue;
           const { eventName, data: parsed } = parsedEvent;
           switch (eventName) {
-            case "intent": callbacks.onIntent?.(parsed); break;
-            case "message": callbacks.onMessage?.(parsed); break;
-            case "risk": callbacks.onRisk?.(parsed); break;
-            case "advice": callbacks.onAdvice?.(parsed); break;
-            case "evidence": callbacks.onEvidence?.(parsed); break;
-            case "rule_source": callbacks.onRuleSource?.(parsed); break;
-            case "audit": callbacks.onAudit?.(parsed); break;
-            case "history": callbacks.onHistory?.(parsed); break;
-            case "result": callbacks.onResult?.(parsed); break;
-            case "contact": callbacks.onContact?.(parsed); break;
+            case "intent": callbacks.onIntent?.(parsed as { type: string }); break;
+            case "message": callbacks.onMessage?.(parsed as { content: string }); break;
+            case "risk": callbacks.onRisk?.(parsed as { risk_level: string; assessment_id: string }); break;
+            case "advice": callbacks.onAdvice?.(parsed as { advice: string }); break;
+            case "evidence": callbacks.onEvidence?.(parsed as { evidence: string }); break;
+            case "rule_source": callbacks.onRuleSource?.(parsed as { matched_rules: RuleHit[]; all_evaluated_rules: string[] }); break;
+            case "audit": callbacks.onAudit?.(parsed as {
+              rule_version: string;
+              model_version: string;
+              content_hash: string;
+              created_at: string;
+              assessment_id: string;
+            }); break;
+            case "history": callbacks.onHistory?.(parsed as HistoryResponse); break;
+            case "result": callbacks.onResult?.(parsed as AssessmentResult); break;
+            case "contact": callbacks.onContact?.(parsed as { id: string; status: string; message: string }); break;
             case "tool_result": callbacks.onToolResult?.(parsed as { tool: string; result: Record<string, unknown> }); break;
-            case "complete": callbacks.onComplete?.(parsed); break;
+            case "complete": callbacks.onComplete?.(parsed as { status: string; assessment_id?: string }); break;
           }
         }
       }
@@ -146,11 +157,15 @@ export function submitAssessment(
 
   (async () => {
     try {
+      const userToken = getUserToken();
+      const parentSessionId = getParentSessionId();
       const resp = await fetch(`${API_BASE}/assess`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           session_id: sessionId,
+          user_token: userToken,
+          parent_session_id: parentSessionId,
           user_input: userInput,
         }),
         signal: controller.signal,
@@ -177,12 +192,18 @@ export function submitAssessment(
           if (!parsedEvent) continue;
           const { eventName, data: parsed } = parsedEvent;
           switch (eventName) {
-            case "risk": onRisk(parsed); break;
-            case "advice": onAdvice(parsed); break;
-            case "evidence": onEvidence(parsed); break;
-            case "rule_source": onRuleSource(parsed); break;
-            case "audit": onAudit(parsed); break;
-            case "complete": onComplete(parsed); break;
+            case "risk": onRisk(parsed as { risk_level: string; assessment_id: string }); break;
+            case "advice": onAdvice(parsed as { advice: string }); break;
+            case "evidence": onEvidence(parsed as { evidence: string }); break;
+            case "rule_source": onRuleSource(parsed as { matched_rules: RuleHit[]; all_evaluated_rules: string[] }); break;
+            case "audit": onAudit(parsed as {
+              rule_version: string;
+              model_version: string;
+              content_hash: string;
+              created_at: string;
+              assessment_id: string;
+            }); break;
+            case "complete": onComplete(parsed as { assessment_id: string }); break;
           }
         }
       }
@@ -214,13 +235,41 @@ export async function contactTeam(
   sessionId: string,
   reason: string = ""
 ): Promise<{ id: string; status: string }> {
+  const userToken = getUserToken();
   const resp = await fetch(`${API_BASE}/contact-team`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       assessment_id: assessmentId,
       session_id: sessionId,
+      user_token: userToken,
       reason,
+    }),
+  });
+  return resp.json();
+}
+
+export async function submitFeedback(
+  sessionId: string,
+  assessmentId: string,
+  feedbackType: "helpful" | "not_helpful" | "correction",
+  correctionText: string | null = null,
+  originalRuleId: string | null = null
+): Promise<{ ok: boolean }> {
+  const userToken = getUserToken();
+  const parentSessionId = getParentSessionId();
+  const resp = await fetch(`${API_BASE}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      session_id: sessionId,
+      assessment_id: assessmentId,
+      user_token: userToken,
+      parent_session_id: parentSessionId,
+      feedback_type: feedbackType,
+      correction_text: correctionText,
+      original_rule_id: originalRuleId,
+      created_at: new Date().toISOString(),
     }),
   });
   return resp.json();

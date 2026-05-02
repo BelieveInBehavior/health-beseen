@@ -23,7 +23,12 @@ router = APIRouter(prefix="/api")
 @router.post("/assess")
 async def assess(req: AssessmentRequest):
     """提交评估 → Orchestrator → SSE stream."""
-    result, audit = await run_assessment(req.session_id, req.user_input)
+    result, audit = await run_assessment(
+        req.session_id,
+        req.user_input,
+        user_token=req.user_token,
+        parent_session_id=req.parent_session_id,
+    )
 
     # Persist to MongoDB
     db = get_db()

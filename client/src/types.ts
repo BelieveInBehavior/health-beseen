@@ -4,6 +4,7 @@ export interface RuleHit {
   keywords_matched: string[];
   advice: string;
   evidence: string;
+  matched_by?: "keyword" | "semantic" | "llm";
 }
 
 export interface AssessmentResult {

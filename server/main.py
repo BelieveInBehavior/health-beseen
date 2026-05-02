@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from server.cache import close_redis, init_redis
 from server.db import close_mongo, init_mongo
+from server.engine.rule_embedder import precompute_rule_embeddings
 from server.routes import assessment, chat, collaboration, events
 
 logging.basicConfig(
@@ -26,6 +27,7 @@ async def lifespan(app: FastAPI):
     # Startup
     await init_mongo()
     await init_redis()
+    await precompute_rule_embeddings()
     logging.getLogger(__name__).info("MongoDB + Redis connected")
     yield
     # Shutdown

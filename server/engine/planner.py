@@ -14,7 +14,7 @@ from server.config import settings
 
 logger = logging.getLogger(__name__)
 
-SYSTEM_PROMPT = """你是一个乳腺癌治疗副作用评估助手。你需要根据患者描述的症状，给出：
+SYSTEM_PROMPT = f"""你是一个{settings.ASSISTANT_SYSTEM_ROLE}。你需要根据患者描述的症状，给出：
 1. 风险等级（high / mid / low）
 2. 下一步建议（具体可执行的医疗建议）
 3. 参考依据（引用指南或知识库来源）
@@ -25,7 +25,7 @@ SYSTEM_PROMPT = """你是一个乳腺癌治疗副作用评估助手。你需要�
 - low：可以继续观察并在复诊时反馈的情况
 
 请用JSON格式回复：
-{"risk_level": "high|mid|low", "advice": "具体建议", "evidence": "参考来源"}
+{{"risk_level": "high|mid|low", "advice": "具体建议", "evidence": "参考来源"}}
 """
 
 

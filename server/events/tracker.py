@@ -24,12 +24,15 @@ VALID_EVENTS = {
     "result_viewed",
     "contact_team_clicked",
     "assessment_closed",
+    "feedback_submitted",
 }
 
 
 async def track_event(
     event_name: str,
     session_id: str,
+    user_token: str = "",
+    patient_id: str | None = None,
     assessment_id: str | None = None,
     payload: dict | None = None,
 ) -> str | None:
@@ -42,6 +45,8 @@ async def track_event(
     doc = {
         "event_name": event_name,
         "session_id": session_id,
+        "user_token": user_token,
+        "patient_id": patient_id,
         "assessment_id": assessment_id,
         "payload": payload or {},
         "created_at": datetime.now(timezone.utc).isoformat(),

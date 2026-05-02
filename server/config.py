@@ -35,6 +35,13 @@ class Settings:
     LLM_TEMPERATURE: float = float(os.getenv("LLM_TEMPERATURE", "0.2"))
     LLM_TOP_P: float = float(os.getenv("LLM_TOP_P", "1.0"))
 
+    # --- Clinical domain (助手身份；症状规则仍在 engine/rules.py + RULE_VERSION) ---
+    # 例：宫颈癌及宫颈病变随诊与症状评估助手、肿瘤治疗副作用评估助手
+    ASSISTANT_SYSTEM_ROLE: str = os.getenv(
+        "ASSISTANT_SYSTEM_ROLE",
+        "肿瘤治疗副作用评估助手",
+    )
+
     # --- Versions ---
     RULE_VERSION: str = "rule_v2.3.1"
     MODEL_VERSION: str = "augment_v1.2"
@@ -74,6 +81,29 @@ class Settings:
     AGENT_LOOP_MAX_STEPS: int = int(os.getenv("AGENT_LOOP_MAX_STEPS", "12"))
     AGENT_LOOP_TOOL_BODY_PREVIEW: int = int(os.getenv("AGENT_LOOP_TOOL_BODY_PREVIEW", "4000"))
     AGENT_LOOP_ACTIVE_SNAP_CHARS: int = int(os.getenv("AGENT_LOOP_ACTIVE_SNAP_CHARS", "28000"))
+
+    # Semantic retrieval / RAG store
+    SEMANTIC_THRESHOLD: float = float(os.getenv("SEMANTIC_THRESHOLD", "0.72"))
+    EMBEDDING_MODEL: str = os.getenv("EMBEDDING_MODEL", "text-embedding-3-small")
+    RULE_EMBEDDINGS_CACHE: str = os.getenv(
+        "RULE_EMBEDDINGS_CACHE",
+        str(Path(__file__).resolve().parent / "engine" / "rule_embeddings.json"),
+    )
+    SEMANTIC_RETRIEVAL_ENABLED: bool = os.getenv("SEMANTIC_RETRIEVAL_ENABLED", "1").lower() not in (
+        "0", "false", "no",
+    )
+    RAG_STORE_ENABLED: bool = os.getenv("RAG_STORE_ENABLED", "1").lower() not in (
+        "0", "false", "no",
+    )
+
+    # Hybrid search（关键词 + 语义向量同时运行，合并分数）
+    # 默认 False：级联策略（keyword→semantic fallback）对当前规则库更优
+    # 规则库扩展到 100+ 条、语义分出现多规则平局时再考虑开启
+    HYBRID_SEARCH_ENABLED: bool = os.getenv("HYBRID_SEARCH_ENABLED", "0").lower() not in (
+        "0", "false", "no",
+    )
+    HYBRID_KEYWORD_WEIGHT: float = float(os.getenv("HYBRID_KEYWORD_WEIGHT", "0.4"))
+    HYBRID_THRESHOLD: float = float(os.getenv("HYBRID_THRESHOLD", "0.30"))
 
 
 settings = Settings()

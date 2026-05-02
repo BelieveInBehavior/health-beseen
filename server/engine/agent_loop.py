@@ -6,10 +6,14 @@ Skills：由 `skills_prompt` 注入 actone 式索引表 + `<available_skills>`�
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from collections.abc import AsyncGenerator
 from typing import Any
+
+import openai
 
 from server.cache import get_assessment_cache, set_assessment_cache
 from server.config import settings
@@ -39,12 +43,22 @@ def _sse(event: str, data: dict) -> dict:
 
 
 def _build_agent_loop_system_content() -> str:
+    now = datetime.now(timezone.utc).isoformat()
     return (
-        "你是乳腺癌治疗副作用评估助手，可通过工具完成用户请求。\n\n"
+        f"你是{settings.ASSISTANT_SYSTEM_ROLE}，可通过工具完成用户请求。当前时间（UTC）：{now}\n\n"
+        "## 能力与工具\n"
+        "- **assess_symptoms**：用户已明确描述身体不适或治疗副作用时调用；`symptoms_text` 须汇总本轮对话中的相关症状表述。\n"
+        "- **get_history**：用户要看「之前的评估」「历史记录」等时调用，无需追问 assessment_id。\n"
+        "- **get_result**：查看某次评估详情；用户未给 ID 时可传 assessment_id 为 latest（由服务端解析）。\n"
+        "- **contact_team**：用户明确要联系医生或医疗团队时调用。\n"
+        "- **list_files / glob_files / grep / read_file / read_document / write_file / delete_file / bash**："
+        "探索工作区与 Skill；读完整流程请 **read_file**，path 与下方索引「File」列或 `<available_skills>` 一致；"
+        "优先 grep/glob/read_file，慎用 bash。\n\n"
         + build_openclaw_skills_section()
         + "\n## 医疗路由备注\n"
-        "- 用户症状描述模糊时先追问，勿直接 assess_symptoms。\n"
-        "- 用中文回复。\n"
+        "- 用户仅说「不舒服」「不太好」等模糊描述时，先追问具体症状、部位、程度、持续时间，勿直接 assess_symptoms。\n"
+        "- 结合整段对话上下文理解意图，不要只依据最后一条用户消息。\n"
+        "- 用中文回复，语气温和专业；评估与事实以工具返回为准，勿编造记录或夸大风险。\n"
     )
 
 
@@ -61,7 +75,9 @@ async def _dispatch_tool(
     args: dict[str, Any],
     *,
     session_id: str,
+    user_token: str,
     user_message: str,
+    parent_session_id: str = "admin",
 ) -> tuple[str, list[dict]]:
     """执行单步工具，返回 (OpenAI tool 消息 JSON 字符串, 需下发的 SSE 事件列表)。"""
     ev: list[dict] = []
@@ -69,7 +85,9 @@ async def _dispatch_tool(
     if name == "assess_symptoms":
         symptoms = str(args.get("symptoms_text", user_message))
         ev.append(_sse("intent", {"type": "assessment", "via": "agent_loop"}))
-        result, audit = await run_assessment(session_id, symptoms)
+        result, audit = await run_assessment(
+            session_id, symptoms, user_token=user_token, parent_session_id=parent_session_id
+        )
         await _persist_assessment(result, audit)
         async for e in stream_result(result, emit_complete=False):
             ev.append(e)
@@ -136,7 +154,6 @@ async def _dispatch_tool(
     if name == "contact_team":
         reason = str(args.get("reason", ""))
         ev.append(_sse("intent", {"type": "contact", "via": "agent_loop"}))
-        from datetime import datetime, timezone
 
         db = get_db()
         doc = {
@@ -225,10 +242,38 @@ def _assistant_to_dict(msg: Any) -> dict[str, Any]:
     return msg.model_dump(exclude_none=True)
 
 
+_RETRYABLE = (
+    openai.InternalServerError,   # 500
+    openai.RateLimitError,        # 429
+    openai.APITimeoutError,       # timeout
+    openai.APIConnectionError,    # 网络抖动
+)
+_MAX_RETRIES = 3
+_RETRY_BASE_DELAY = 1.0  # seconds
+
+
+async def _chat_with_retry(client, **kwargs):
+    """对瞬时错误做指数退避重试，最多 _MAX_RETRIES 次。"""
+    for attempt in range(_MAX_RETRIES + 1):
+        try:
+            return await client.chat.completions.create(**kwargs)
+        except _RETRYABLE as e:
+            if attempt == _MAX_RETRIES:
+                raise
+            delay = _RETRY_BASE_DELAY * (2 ** attempt)
+            logger.warning(
+                "agent_loop completion failed (attempt %d/%d): %s — retry in %.1fs",
+                attempt + 1, _MAX_RETRIES, e, delay,
+            )
+            await asyncio.sleep(delay)
+
+
 async def run_agent_loop(
     session_id: str,
+    user_token: str,
     user_message: str,
     history: list[dict[str, str]],
+    parent_session_id: str = "admin",
 ) -> AsyncGenerator[dict, None]:
     """多轮工具循环；结束时发 message（若有）与 complete。"""
     client, model = router_mod._get_client()
@@ -251,17 +296,28 @@ async def run_agent_loop(
         messages[0] = {"role": "system", "content": _build_agent_loop_system_content()}
 
         try:
-            resp = await client.chat.completions.create(
+            resp = await _chat_with_retry(
+                client,
                 model=model,
                 messages=messages,
                 tools=router_mod.TOOLS,
                 tool_choice="auto",
                 temperature=min(0.2, float(settings.LLM_TEMPERATURE)),
             )
+        except openai.RateLimitError:
+            logger.warning("agent_loop rate limited after retries")
+            yield _sse("message", {"content": "服务当前请求量过高，请稍后再试。"})
+            yield _sse("complete", {"status": "error", "reason": "rate_limit"})
+            return
+        except (openai.InternalServerError, openai.APITimeoutError, openai.APIConnectionError) as e:
+            logger.exception("agent_loop completion failed after retries: %s", e)
+            yield _sse("message", {"content": "AI 服务暂时不可用，请稍后重试。如持续出现请联系支持团队。"})
+            yield _sse("complete", {"status": "error", "reason": "service_unavailable"})
+            return
         except Exception as e:
-            logger.exception("agent_loop completion failed: %s", e)
-            yield _sse("message", {"content": f"模型调用失败：{e}"})
-            yield _sse("complete", {"status": "error"})
+            logger.exception("agent_loop unexpected error: %s", e)
+            yield _sse("message", {"content": "处理请求时发生意外错误，请稍后重试。"})
+            yield _sse("complete", {"status": "error", "reason": "unknown"})
             return
 
         choice = resp.choices[0].message
@@ -279,7 +335,9 @@ async def run_agent_loop(
                     tname,
                     targs,
                     session_id=session_id,
+                    user_token=user_token,
                     user_message=user_message,
+                    parent_session_id=parent_session_id,
                 )
                 for e in extra_ev:
                     yield e

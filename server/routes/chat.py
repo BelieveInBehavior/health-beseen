@@ -11,8 +11,10 @@ Chat route — POST /api/chat
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+from datetime import datetime, timezone
 from collections.abc import AsyncGenerator
 
 from fastapi import APIRouter
@@ -23,7 +25,9 @@ from server.db import get_db
 from server.engine.agent import run_assessment
 from server.engine.executor import stream_result
 from server.engine.agent_loop import run_agent_loop
+from server.engine.rag_store import save_user_feedback
 from server.engine.router import route
+from server.engine.summarizer import summarize_session
 from server.engine.workspace_tools import (
     bash_tool,
     delete_file_tool,
@@ -35,7 +39,7 @@ from server.engine.workspace_tools import (
     write_file_tool,
 )
 from server.memory.manager import save_assessment
-from server.models import ChatRequest, HistoryItem, HistoryResponse
+from server.models import ChatRequest, HistoryItem, HistoryResponse, SessionRequest, UserFeedback
 
 logger = logging.getLogger(__name__)
 
@@ -46,11 +50,18 @@ def _sse(event: str, data: dict) -> dict:
     return {"event": event, "data": json.dumps(data, ensure_ascii=False)}
 
 
-async def _handle_assessment(session_id: str, symptoms_text: str) -> AsyncGenerator[dict, None]:
+async def _handle_assessment(
+    session_id: str,
+    user_token: str,
+    symptoms_text: str,
+    parent_session_id: str = "admin",
+) -> AsyncGenerator[dict, None]:
     """执行评估并流式输出结果。"""
     yield _sse("intent", {"type": "assessment"})
 
-    result, audit = await run_assessment(session_id, symptoms_text)
+    result, audit = await run_assessment(
+        session_id, symptoms_text, user_token=user_token, parent_session_id=parent_session_id
+    )
 
     # Persist
     db = get_db()
@@ -296,7 +307,9 @@ async def _chat_stream_single_shot(req: ChatRequest) -> AsyncGenerator[dict, Non
     if tool == "assess_symptoms":
         # Skill: 完整评估流程（submit_assessment → 持久化 → 取结果 → 流式展示）
         symptoms_text = args.get("symptoms_text", req.message)
-        async for event in _handle_assessment(req.session_id, symptoms_text):
+        async for event in _handle_assessment(
+            req.session_id, req.user_token, symptoms_text, req.parent_session_id
+        ):
             yield event
 
     elif tool == "get_history":
@@ -336,7 +349,9 @@ async def chat_stream(req: ChatRequest) -> AsyncGenerator[dict, None]:
     """根据 use_agent_loop：多轮 agent loop 或单跳 legacy。"""
     if req.use_agent_loop:
         try:
-            async for event in run_agent_loop(req.session_id, req.message, req.history):
+            async for event in run_agent_loop(
+                req.session_id, req.user_token, req.message, req.history, req.parent_session_id
+            ):
                 yield event
         except Exception as e:
             logger.exception("agent_loop failed, falling back to single-shot: %s", e)
@@ -351,3 +366,17 @@ async def chat_stream(req: ChatRequest) -> AsyncGenerator[dict, None]:
 async def chat(req: ChatRequest):
     """统一对话入口 — SSE 流式响应。"""
     return EventSourceResponse(chat_stream(req))
+
+
+@router.post("/feedback")
+async def post_feedback(doc: UserFeedback):
+    db = get_db()
+    await save_user_feedback(db, doc)
+    return {"ok": True}
+
+
+@router.post("/session/summarize")
+async def summarize(req: SessionRequest):
+    db = get_db()
+    asyncio.create_task(summarize_session(db, req.session_id, req.user_token))
+    return {"ok": True, "queued_at": datetime.now(timezone.utc).isoformat()}
