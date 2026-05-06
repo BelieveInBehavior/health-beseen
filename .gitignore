@@ -4,4 +4,8 @@ __pycache__/
 .venv/
 client/dist/
 server/memory/store/*.json
+.env
+.env.*
+!.env.example
+server/.env
 .env.local
