@@ -197,24 +197,25 @@ async def evaluate_hybrid(
     rule_embeddings: list[dict],
 ) -> tuple[list[Rule], list[str], float]:
     """
-    混合检索：关键词二值得分 + 余弦相似度，加权合并后按 level-stop 策略返回。
-
-    hybrid_score = kw_weight × kw_score + (1 - kw_weight) × sem_score
-      kw_score  = 1.0 若任一关键词命中，否则 0.0（二值，保留原有"任一命中"语义）
-      sem_score = 余弦相似度（0-1）
-
-    graceful degradation：rule_embeddings 为空或 embedding API 失败时自动回退到 evaluate()。
+    混合检索（关键词优先）：
+    1) 先执行纯关键词 evaluate()，只要命中立即返回；
+    2) 仅当关键词未命中时，才执行 embedding 语义检索并按 level-stop 返回。
     """
     from server.engine.rule_embedder import get_embedding
 
     all_ids = [r.id for r in ALL_RULES]
 
+    # 先走纯关键词：只要命中就直接返回，不再计算 embedding
+    kw_matched, _, kw_conf = evaluate(text)
+    if kw_matched:
+        return kw_matched, all_ids, kw_conf
+
     if not rule_embeddings:
-        return evaluate(text)
+        return [], all_ids, 0.0
 
     query_emb = await get_embedding(text)
     if not query_emb:
-        return evaluate(text)
+        return [], all_ids, 0.0
 
     sem_by_id: dict[str, float] = {
         row["rule_id"]: _cosine_similarity(query_emb, row.get("embedding") or [])
@@ -222,25 +223,13 @@ async def evaluate_hybrid(
         if row.get("rule_id")
     }
 
-    kw_weight = settings.HYBRID_KEYWORD_WEIGHT
-    sem_weight = 1.0 - kw_weight
-
     candidates: list[tuple[Rule, float]] = []
     for rule in ALL_RULES:
-        kw_hit = any(kw in text for kw in rule.keywords)
-        kw_score = 1.0 if kw_hit else 0.0
         sem_score = sem_by_id.get(rule.id, 0.0)
-        hybrid_score = kw_weight * kw_score + sem_weight * sem_score
 
-        if hybrid_score < settings.HYBRID_THRESHOLD:
+        # 关键词未命中时，仅依赖语义得分做候选
+        if sem_score < settings.SEMANTIC_THRESHOLD:
             continue
-
-        if kw_hit and sem_score > 0.0:
-            mb = "hybrid"
-        elif kw_hit:
-            mb = "keyword"
-        else:
-            mb = "semantic"
 
         candidates.append((
             Rule(
@@ -250,9 +239,9 @@ async def evaluate_hybrid(
                 keywords=rule.keywords,
                 advice=rule.advice,
                 evidence=rule.evidence,
-                matched_by=mb,
+                matched_by="semantic",
             ),
-            hybrid_score,
+            sem_score,
         ))
 
     if not candidates:

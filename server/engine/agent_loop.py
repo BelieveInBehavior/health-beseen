@@ -20,6 +20,7 @@ from server.config import settings
 from server.db import get_db
 from server.engine import router as router_mod
 from server.engine.agent import run_assessment
+from server.engine.assess_tool_args import merge_assess_symptoms_to_user_input
 from server.engine.executor import stream_result
 from server.engine.skills_prompt import build_openclaw_skills_section
 from server.engine.workspace_tools import (
@@ -47,7 +48,8 @@ def _build_agent_loop_system_content() -> str:
     return (
         f"你是{settings.ASSISTANT_SYSTEM_ROLE}，可通过工具完成用户请求。当前时间（UTC）：{now}\n\n"
         "## 能力与工具\n"
-        "- **assess_symptoms**：用户已明确描述身体不适或治疗副作用时调用；`symptoms_text` 须汇总本轮对话中的相关症状表述。\n"
+        "- **assess_symptoms**：用户已明确描述身体不适或治疗副作用时调用；必须传结构化参数 "
+        "`symptoms`(string[])、`location`(string)、`duration`(string)。\n"
         "- **get_history**：用户要看「之前的评估」「历史记录」等时调用，无需追问 assessment_id。\n"
         "- **get_result**：查看某次评估详情；用户未给 ID 时可传 assessment_id 为 latest（由服务端解析）。\n"
         "- **contact_team**：用户明确要联系医生或医疗团队时调用。\n"
@@ -83,10 +85,11 @@ async def _dispatch_tool(
     ev: list[dict] = []
 
     if name == "assess_symptoms":
-        symptoms = str(args.get("symptoms_text", user_message))
+        # actone execute_tool：arguments 在执行处规范化后再调下游（此处再拼成 user_input 供 run_assessment）
+        user_input = merge_assess_symptoms_to_user_input(args, user_message)
         ev.append(_sse("intent", {"type": "assessment", "via": "agent_loop"}))
         result, audit = await run_assessment(
-            session_id, symptoms, user_token=user_token, parent_session_id=parent_session_id
+            session_id, user_input, user_token=user_token, parent_session_id=parent_session_id
         )
         await _persist_assessment(result, audit)
         async for e in stream_result(result, emit_complete=False):

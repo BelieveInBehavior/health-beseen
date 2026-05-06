@@ -38,6 +38,7 @@ health-beseen/
 │   │   └── collaboration.py
 │   ├── engine/
 │   │   ├── agent.py
+│   │   ├── assess_tool_args.py  ← LLM assess_symptoms 参数规范化 + 拼成 user_input
 │   │   ├── perception.py
 │   │   ├── rules.py
 │   │   ├── planner.py
@@ -230,30 +231,35 @@ npm run dev
 
 下文仍以文档化的 schema 形式列出主要能力（名称与实现中 `function.name` 可能用 `assess_symptoms` 等统一命名）：
 
-#### 1. `submit_assessment` — 提交症状评估
+#### 1. `assess_symptoms` — 提交症状评估（结构化参数）
 
 ```json
 {
-  "name": "submit_assessment",
-  "description": "用户描述了副作用或身体不适症状，需要进行风险评估。",
+  "name": "assess_symptoms",
+  "description": "评估患者症状风险等级",
   "parameters": {
     "type": "object",
     "properties": {
-      "user_input": {
-        "type": "string",
-        "description": "用户描述的症状文本"
+      "symptoms": {
+        "type": "array",
+        "items": {"type": "string"},
+        "description": "症状列表，如['胸闷', '发热']"
       },
-      "session_id": {
+      "location": {
         "type": "string",
-        "description": "当前会话 ID"
+        "description": "症状部位，如'胸口'、'腹部'"
+      },
+      "duration": {
+        "type": "string",
+        "description": "持续时间，如'两天'、'三小时'"
       }
     },
-    "required": ["user_input", "session_id"]
+    "required": ["symptoms", "location", "duration"]
   }
 }
 ```
 
-对应 API: `POST /api/assess`
+对应执行：`assess_symptoms` 入参由 LLM 直接生成结构化 JSON，服务端将其拼装后调用评估链路（`run_assessment`）。
 
 #### 2. `get_result` — 查询已有评估结果
 
@@ -334,7 +340,7 @@ npm run dev
 
 ```
 用户描述症状
-  → submit_assessment（调用 Orchestrator Agent）
+  → assess_symptoms({symptoms, location, duration})（调用 Orchestrator Agent）
   → 自动获取结果（内部 get_result）
   → 组装展示（风险等级 + 建议 + 证据 + 审计信息）
 ```
@@ -381,7 +387,7 @@ LLM 根据用户输入选择调用的 Tool/Skill，或直接文本回复：
 ```
 用户: 化疗后呼吸困难，还有点胸闷
 模型: [调用 assess_symptoms skill]
-     → submit_assessment(user_input="化疗后呼吸困难，还有点胸闷")
+     → assess_symptoms(symptoms=["呼吸困难","胸闷"], location="胸口", duration="未指定")
      → 自动获取并展示结果
 输出: 风险等级 HIGH，建议立即就医...
 ```

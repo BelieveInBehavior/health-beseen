@@ -68,7 +68,7 @@ ROUTER_SYSTEM_BASE = f"""\
 重要规则：
 - 如果用户只说"不舒服""不太好"等模糊描述，先追问具体症状，不要直接评估
 - 从整个对话上下文提取症状，不仅是最后一条消息
-- 调用 assess_symptoms 时，symptoms_text 应包含从对话中提取的所有症状描述
+- 调用 assess_symptoms 时，必须传结构化参数：symptoms(数组)、location、duration
 - 用户说"之前的评估""历史记录""看看记录"时，直接调用 get_history，不需要追问 ID
 - 用中文回复，语气温和专业
 """
@@ -85,16 +85,25 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "assess_symptoms",
-            "description": "【主路径 Skill】用户描述了身体不适或副作用症状，需要完整的风险评估流程（评估 → 取结果 → 展示）。当用户明确描述了症状时调用。",
+            "description": "【主路径 Skill】用户描述了身体不适或副作用症状，需要完整的风险评估流程（评估 → 取结果 → 展示）。当用户明确描述了症状时调用，必须传结构化参数。",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "symptoms_text": {
+                    "symptoms": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "症状列表，如['胸闷', '发热']",
+                    },
+                    "location": {
                         "type": "string",
-                        "description": "从对话中提取的完整症状描述，包含对话历史中所有相关症状",
-                    }
+                        "description": "症状部位，如'胸口'、'腹部'",
+                    },
+                    "duration": {
+                        "type": "string",
+                        "description": "持续时间，如'两天'、'三小时'",
+                    },
                 },
-                "required": ["symptoms_text"],
+                "required": ["symptoms", "location", "duration"],
             },
         },
     },
@@ -490,7 +499,11 @@ def _fallback_route(message: str) -> RouterDecision:
         return RouterDecision(
             type="tool_call",
             tool_name="assess_symptoms",
-            tool_args={"symptoms_text": message},
+            tool_args={
+                "symptoms": [message],
+                "location": "未指定",
+                "duration": "未指定",
+            },
         )
 
     # 默认文本回复

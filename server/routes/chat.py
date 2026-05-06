@@ -23,6 +23,7 @@ from sse_starlette.sse import EventSourceResponse
 from server.cache import get_assessment_cache, set_assessment_cache
 from server.db import get_db
 from server.engine.agent import run_assessment
+from server.engine.assess_tool_args import merge_assess_symptoms_to_user_input
 from server.engine.executor import stream_result
 from server.engine.agent_loop import run_agent_loop
 from server.engine.rag_store import save_user_feedback
@@ -306,7 +307,7 @@ async def _chat_stream_single_shot(req: ChatRequest) -> AsyncGenerator[dict, Non
 
     if tool == "assess_symptoms":
         # Skill: 完整评估流程（submit_assessment → 持久化 → 取结果 → 流式展示）
-        symptoms_text = args.get("symptoms_text", req.message)
+        symptoms_text = merge_assess_symptoms_to_user_input(args, req.message)
         async for event in _handle_assessment(
             req.session_id, req.user_token, symptoms_text, req.parent_session_id
         ):
