@@ -1,8 +1,14 @@
 import React, { useRef, useEffect, useState, useCallback } from "react";
-import { sendChat } from "../api";
+import { contactTeam, sendChat } from "../api";
 import type { ChatCallbacks } from "../api";
+import { trackEvent } from "../components/EventTracker";
 import type { AssessmentResult, ChatMessage, HistoryResponse } from "../types";
 import AssessmentCard from "../components/AssessmentCard";
+
+function parseRiskLevel(v: unknown): AssessmentResult["risk_level"] | undefined {
+  if (v === "high" || v === "mid" || v === "low") return v;
+  return undefined;
+}
 
 const QUICK_CHIPS = [
   { label: "持续低烧", text: "最近3天持续低烧，37.5°C左右" },
@@ -25,12 +31,22 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
   const [thinking, setThinking] = useState(false);
   const chatAreaRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
+  const onAssessmentResultRef = useRef(onAssessmentResult);
+  /** 同一次对话流中，risk 事件先于助手 message 时，把等级挂到下一条文本气泡 */
+  const pendingRiskForAssistantMsgRef = useRef<{
+    risk_level: AssessmentResult["risk_level"];
+    assessment_id: string;
+  } | null>(null);
 
   useEffect(() => {
     if (chatAreaRef.current) {
       chatAreaRef.current.scrollTop = chatAreaRef.current.scrollHeight;
     }
   }, [messages, thinking]);
+
+  useEffect(() => {
+    onAssessmentResultRef.current = onAssessmentResult;
+  }, [onAssessmentResult]);
 
   // Build conversation history for the LLM router
   function buildHistory(): { role: string; content: string }[] {
@@ -46,8 +62,9 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
     text: string,
     msgType?: ChatMessage["msgType"],
     data?: ChatMessage["data"],
+    meta?: Pick<ChatMessage, "risk_level" | "assessment_id">,
   ): ChatMessage[] {
-    const next = [...msgs, { role, text, msgType, data }];
+    const next = [...msgs, { role, text, msgType, data, ...meta }];
     onMessagesChange(next);
     return next;
   }
@@ -80,9 +97,30 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
       },
       onMessage: (data) => {
         setThinking(false);
-        addMsg(updated, "bot", data.content, "text");
+        const fromPayloadLevel = parseRiskLevel(data.risk_level);
+        const fromPayloadAid = typeof data.assessment_id === "string" ? data.assessment_id : undefined;
+        let risk_level = fromPayloadLevel;
+        let assessment_id = fromPayloadAid;
+        if (risk_level === undefined && pendingRiskForAssistantMsgRef.current) {
+          risk_level = pendingRiskForAssistantMsgRef.current.risk_level;
+          assessment_id = assessment_id ?? pendingRiskForAssistantMsgRef.current.assessment_id;
+        } else if (risk_level === "high" && !assessment_id && pendingRiskForAssistantMsgRef.current?.risk_level === "high") {
+          assessment_id = pendingRiskForAssistantMsgRef.current.assessment_id;
+        }
+        pendingRiskForAssistantMsgRef.current = null;
+        const meta =
+          risk_level === "high"
+            ? { risk_level: "high" as const, ...(assessment_id ? { assessment_id } : {}) }
+            : undefined;
+        addMsg(updated, "bot", data.content, "text", undefined, meta);
       },
       onRisk: (data) => {
+        const level = parseRiskLevel(data.risk_level);
+        if (level === "high" && data.assessment_id) {
+          pendingRiskForAssistantMsgRef.current = { risk_level: "high", assessment_id: data.assessment_id };
+        } else {
+          pendingRiskForAssistantMsgRef.current = null;
+        }
         partial = { ...partial, risk_level: data.risk_level as AssessmentResult["risk_level"], assessment_id: data.assessment_id };
       },
       onAdvice: (data) => {
@@ -118,7 +156,7 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
         } else {
           const r = data as AssessmentResult;
           addMsg(updated, "bot", `评估结果 #${r.assessment_id}`, "assessment", r);
-          onAssessmentResult?.(r);
+          onAssessmentResultRef.current?.(r);
         }
       },
       onContact: (data) => {
@@ -127,6 +165,7 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
       },
       onComplete: () => {
         setThinking(false);
+        pendingRiskForAssistantMsgRef.current = null;
         if (intentType === "assessment" && partial.assessment_id) {
           const finalResult: AssessmentResult = {
             assessment_id: partial.assessment_id!,
@@ -143,7 +182,7 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
             content_hash: partial.content_hash || "",
             created_at: partial.created_at || new Date().toISOString(),
           };
-          // Replace the "thinking" message with assessment card
+          // Replace the "thinking" message with assessment card（卡片内已有风险展示，不重复挂 message 级 risk_level）
           const withResult = [...updated, {
             role: "bot" as const,
             text: `评估完成 — ${finalResult.risk_level === "high" ? "高风险" : finalResult.risk_level === "mid" ? "中风险" : "低风险"}`,
@@ -151,7 +190,7 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
             data: finalResult,
           }];
           onMessagesChange(withResult);
-          onAssessmentResult?.(finalResult);
+          onAssessmentResultRef.current?.(finalResult);
         }
       },
       onError: (err) => {
@@ -162,7 +201,7 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
     };
 
     abortRef.current = sendChat(sessionId, text, history, callbacks);
-  }, [messages, sessionId, onMessagesChange, onAssessmentResult]);
+  }, [messages, sessionId, onMessagesChange]);
 
   function sendMsg() {
     const val = input.trim();
@@ -222,10 +261,27 @@ export default function ChatPage({ messages, onMessagesChange, sessionId, onAsse
           if (m.role === "bot" && m.msgType === "thinking") {
             return <div key={i} className="bubble bot thinking">{m.text}</div>;
           }
-          // Normal bubble
+          // Normal bubble（高风险助手文案旁展示紧急行动按钮）
           return (
             <div key={i} className={`bubble ${m.role}`}>
-              {m.text}
+              <div>{m.text}</div>
+              {m.role === "bot" && m.risk_level === "high" && (
+                <button
+                  type="button"
+                  className="contact-btn chat-high-risk-cta"
+                  onClick={async () => {
+                    if (m.assessment_id) {
+                      await contactTeam(m.assessment_id, sessionId, "高风险：立即线下就医/24h联系团队");
+                      trackEvent("contact_team_clicked", sessionId, m.assessment_id);
+                      alert("已通知医疗团队，请尽快线下就医；团队将在24小时内与您联系。");
+                    } else {
+                      alert("请尽快前往医院急诊科或门诊就诊。完成一次症状评估后，可在「评估结果」页联系医疗团队。");
+                    }
+                  }}
+                >
+                  立即线下就医 / 24h 联系团队
+                </button>
+              )}
             </div>
           );
         })}

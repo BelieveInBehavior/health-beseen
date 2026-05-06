@@ -5,7 +5,7 @@ import { getUserToken, getParentSessionId } from "./userToken";
 
 export interface ChatCallbacks {
   onIntent?: (data: { type: string }) => void;
-  onMessage?: (data: { content: string }) => void;
+  onMessage?: (data: { content: string; risk_level?: string; assessment_id?: string }) => void;
   onRisk?: (data: { risk_level: string; assessment_id: string }) => void;
   onAdvice?: (data: { advice: string }) => void;
   onEvidence?: (data: { evidence: string }) => void;

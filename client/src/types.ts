@@ -41,4 +41,7 @@ export interface ChatMessage {
   text: string;
   msgType?: "text" | "assessment" | "history" | "contact" | "thinking";
   data?: AssessmentResult | HistoryResponse | Record<string, unknown>;
+  /** 来自 SSE message 或紧随 risk 事件的助手文本，用于高风险行动条 */
+  risk_level?: "high" | "mid" | "low";
+  assessment_id?: string;
 }

@@ -197,6 +197,7 @@ npm run dev
 前端接口调用方式（当前默认）：
 - 直接请求后端：`http://localhost:8000/api`
 - 不依赖 Vite `/api` 代理
+- 对话页：解析 SSE `message` 中可选的 `risk_level` / `assessment_id`；若本条助手文本为高风险（或与同轮 `risk` 事件衔接），在气泡下展示「立即线下就医 / 24h 联系团队」并调用 `POST /api/contact-team`（有 `assessment_id` 时）
 - SSE 事件解析兼容 `event:xxx` / `event: xxx` 与 `data:xxx` / `data: xxx` 两种写法，并支持 `\n` 与 `\r\n` 换行分隔
 
 ## API 概览

@@ -262,6 +262,12 @@ body {
 }
 .contact-btn:hover { background: var(--high-bg); }
 
+.chat-high-risk-cta {
+  display: block;
+  width: 100%;
+  margin-top: 12px;
+}
+
 /* ── History Page ── */
 .history-scroll {
   flex: 1;
